@@ -384,7 +384,8 @@ def fence_for(text):
     return "`" * max(3, longest + 1)
 
 
-def append_round(path, number, title, timestamp, builder, reviewer, prompt, reply, disposition):
+def append_round(path, number, title, timestamp, builder, reviewer, prompt, reply,
+                 disposition, questions=()):
     date_heading = timestamp.strftime("## %m-%d-%Y")
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     headings = re.findall(r"^## \d{2}-\d{2}-\d{4}$", existing, re.MULTILINE)
@@ -406,6 +407,14 @@ def append_round(path, number, title, timestamp, builder, reviewer, prompt, repl
         f"{builder} to itself\n\n"
         f"{disposition}\n"
     )
+    if questions:
+        # In the round itself, not only on a terminal that gets closed. The prompt is
+        # recorded verbatim above and carries the tag inside it, so a question is only
+        # findable later if it has a heading of its own. Numbered, because the answers
+        # are appended as their own block rather than written back over these lines.
+        entry += "\nquestions for you\n\n"
+        entry += "".join(f"{index}. {question}\n"
+                         for index, question in enumerate(questions, 1))
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(entry)
@@ -413,10 +422,31 @@ def append_round(path, number, title, timestamp, builder, reviewer, prompt, repl
         os.fsync(handle.fileno())
 
 
-def build_proposal_prompt(task, builder, reviewer, prior, round_number):
+def latest_answers(path):
+    """What the human said to the last round's questions, if they said anything.
+
+    Read back out of COMMS.md rather than passed on the command line, so the answer the
+    next round is built on is the one written down, not one retyped from memory.
+    """
+    if not path.exists():
+        return []
+    blocks = re.findall(r"^answers to round \d+\n\n((?:.+\n)+)",
+                        path.read_text(encoding="utf-8"), re.MULTILINE)
+    if not blocks:
+        return []
+    return [line.strip() for line in blocks[-1].strip().splitlines() if line.strip()]
+
+
+def build_proposal_prompt(task, builder, reviewer, prior, round_number, answers=()):
     # Only the last disposition. Joining every prior one made each round carry all the
     # rounds before it, so cost per round climbed while value per round fell.
     prior_text = "No prior rounds." if not prior else prior[-1]
+    # Passthrough means the question was put and left unanswered on purpose. It is not
+    # the same as never having been asked, and the builder is told the difference.
+    answered = ("\n\nAnswers to the questions from the last round:\n"
+                + "\n".join(answers)
+                + "\nAn answer of Passthrough means it was left to you deliberately."
+                if answers else "")
     return (
         f"Task:\n{task}\n\n"
         f"You are {builder}, the builder. {reviewer} is the read-only reviewer.\n"
@@ -428,6 +458,7 @@ def build_proposal_prompt(task, builder, reviewer, prior, round_number):
         f"If you need a judgment that is not yours to make, put it on its own line starting with "
         f"[{QUESTION}] and carry on with the rest.\n\n"
         f"Prior dispositions:\n{prior_text}\n\n"
+        f"{answered}\n\n"
         f"Produce the round {round_number} proposal for review. State changed files, checks run and "
         "anything not verified."
     )
@@ -528,6 +559,10 @@ def verdict_line(clean, counts, ship, leftover):
     return f"Findings: {summary}."
 
 
+def plural(count, word):
+    return f"{count} {word}" + ("" if count == 1 else "s")
+
+
 def cost_line(turns):
     """What the round cost, per participant. A turn whose command did not write
     {tokens} is named as unreported rather than counted as zero."""
@@ -607,7 +642,8 @@ def main(argv=None):
             number = completed + offset + 1
             title = args.round_title[min(offset, len(args.round_title) - 1)]
             proposal_prompt = build_proposal_prompt(
-                args.task, builder_name, reviewer_name, dispositions, number
+                args.task, builder_name, reviewer_name, dispositions, number,
+                latest_answers(args.comms) if offset == 0 else (),
             )
             proposal_id, proposal, build_tokens = run_turn(
                 log, builder_command, proposal_prompt, args.workdir, args.timeout,
@@ -639,7 +675,12 @@ def main(argv=None):
             fix_tokens = None
             if done:
                 # Nothing to dispose of, and no reason to spend a builder turn saying so.
-                disposition = "The reviewer reported no findings. Nothing was changed."
+                # The two ways of being done are not the same and the record says which.
+                left = sum(len(found) for found in counts.values())
+                disposition = ("The reviewer reported no findings. Nothing was changed."
+                               if clean else
+                               f"Nothing blocking left. {plural(left, 'improvement')} "
+                               "recorded and deliberately not acted on.")
             else:
                 disposition_prompt = build_disposition_prompt(
                     args.task, builder_name, proposal, review
@@ -660,6 +701,7 @@ def main(argv=None):
                 review_prompt,
                 review,
                 disposition,
+                pending,
             )
             dispositions.append(disposition)
             print(f"Round {number} complete at {timestamp.strftime('%H:%M')}")

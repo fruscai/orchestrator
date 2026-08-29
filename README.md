@@ -39,6 +39,37 @@ Timeout and interruption terminate the active agent process group. A descendant 
 separate process group is outside that boundary, but it cannot keep the coordinator waiting on the
 original output pipes.
 
+## Questions
+
+Any agent can put a line starting with `[QUESTION]` in its reply. Those lines are collected from all
+three turns, written into the round in `COMMS.md` under `questions for you`, printed, and the run
+stops with exit 5. A question that does not stop the run is not a question: the rounds after it
+would rest on an answer nobody gave.
+
+Answer before the next round:
+
+```sh
+python3 ../answer.py --comms COMMS.md "yes, an empty file is an error"
+```
+
+The answers are appended as their own block, `answers to round N`, so what was asked stays exactly
+as it was asked. Every question gets a line. `--passthrough` fills the rest with `Passthrough`,
+which records that a question was put and left unanswered on purpose. That is not the same as never
+having been asked, and the next round is told the difference.
+
+The coordinator reads the last answers block out of `COMMS.md` itself and puts it in the next
+round's build prompt. Nothing is retyped by hand.
+
+## Findings and severity
+
+The reviewer starts every finding with `[SECURITY]`, `[BLOCKING]` or `[IMPROVEMENT]`. Improvements
+do not hold a round open, so the loop stops at the smallest thing that works. A review with any
+untagged line is never shippable: a reviewer ignoring the format has said nothing that can be read,
+and ambiguity holds the round open rather than shipping.
+
+Exit codes: 0 done, 1 error, 2 usage, 3 rounds used up with blocking findings open, 4 a security
+finding was raised, 5 waiting on an answer, 130 interrupted.
+
 ## Test
 
 ```sh

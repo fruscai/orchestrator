@@ -578,6 +578,10 @@ class SeverityTests(unittest.TestCase):
             result = self.run_with_review(root, "- [IMPROVEMENT] the naming could be clearer")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("smallest thing that works", result.stdout)
+            # A round that shipped with an improvement open must not claim the reviewer
+            # found nothing.
+            self.assertIn("deliberately not acted on",
+                          (root / "COMMS.md").read_text(encoding="utf-8"))
             self.assertNotIn("Round 2 —", (root / "COMMS.md").read_text(encoding="utf-8"))
             self.assertEqual(self.findings_recorded(root)[1], 1)
 
@@ -618,7 +622,19 @@ class SeverityTests(unittest.TestCase):
             # A question stops the run: the rounds after it would rest on an answer
             # nobody gave.
             self.assertEqual(result.returncode, 5)
-            self.assertNotIn("Round 2 —", (root / "COMMS.md").read_text(encoding="utf-8"))
+            text = (root / "COMMS.md").read_text(encoding="utf-8")
+            self.assertNotIn("Round 2 —", text)
+            # In the round itself, under a heading of its own. Printing it to a terminal
+            # that gets closed is not a record.
+            self.assertIn("questions for you", text)
+            self.assertIn("1. should this refuse unknown hosts outright?", text)
+            self.assertLess(text.index("Agent A to itself"), text.index("questions for you"))
+
+    def test_a_round_with_no_questions_has_no_section(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.run_with_review(root, "- [IMPROVEMENT] the naming could be clearer")
+            self.assertNotIn("questions for you", (root / "COMMS.md").read_text(encoding="utf-8"))
 
     def test_a_tagged_improvement_does_not_launder_an_untagged_line(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -684,6 +700,94 @@ class SeverityTests(unittest.TestCase):
             self.assertEqual(result.returncode, 5, result.stderr)
             self.assertIn("should unknown hosts be refused outright?", result.stdout)
             self.assertIn("agent exited with 9", result.stderr)
+
+
+class AnswerTests(unittest.TestCase):
+    """A question is only in the loop if the answer gets back into it. Answering by hand
+    and retyping it into the next task is the step that quietly does not happen."""
+
+    ANSWER = PROJECT.parent / "answer.py"
+
+    def setUp(self):
+        if not WRITER.is_file():
+            self.skipTest(f"no routelog.py at {WRITER}")
+        if not self.ANSWER.is_file():
+            self.skipTest(f"no answer.py at {self.ANSWER}")
+
+    def build(self, root):
+        import shutil
+
+        shutil.copy(WRITER, root / "routelog.py")
+        fake = root / "fake.py"
+        fake.write_text(
+            "import pathlib, sys\n"
+            "prompt = sys.stdin.read()\n"
+            "pathlib.Path(sys.argv[2]).open('a').write(prompt + '\\n=====\\n')\n"
+            "if sys.argv[1] == 'b':\n"
+            "    print('- [BLOCKING] it drops the last row\\n"
+            "[QUESTION] should empty files be an error?')\n"
+            "else:\n"
+            "    print(sys.argv[1] + ': built')\n",
+            encoding="utf-8",
+        )
+        seen = root / "prompts.txt"
+        arguments = base_command(root, fake, root / "COMMS.md")
+        for side in ("--agent-a", "--agent-b"):
+            letter = side[-1]
+            arguments[arguments.index(side) + 1] = (
+                f"{quoted(sys.executable)} {quoted(str(fake))} {letter} {quoted(str(seen))}"
+            )
+        return arguments, seen
+
+    def answer(self, root, *extra):
+        return subprocess.run(
+            [sys.executable, str(self.ANSWER), "--comms", str(root / "COMMS.md"), *extra],
+            text=True, capture_output=True, check=False,
+        )
+
+    def test_an_answer_reaches_the_next_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            arguments, seen = self.build(root)
+            first = subprocess.run(arguments, text=True, capture_output=True, check=False)
+            self.assertEqual(first.returncode, 5, first.stderr)
+            recorded = self.answer(root, "yes, an empty file is an error")
+            self.assertEqual(recorded.returncode, 0, recorded.stderr)
+            text = (root / "COMMS.md").read_text(encoding="utf-8")
+            # Appended, never written back over what was asked.
+            self.assertLess(text.index("questions for you"), text.index("answers to round 1"))
+            self.assertIn("1. yes, an empty file is an error", text)
+            seen.unlink()
+            subprocess.run(arguments, text=True, capture_output=True, check=False)
+            self.assertIn("yes, an empty file is an error",
+                          seen.read_text(encoding="utf-8").split("=====")[0])
+
+    def test_passthrough_is_recorded_as_a_deliberate_silence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            arguments, _ = self.build(root)
+            subprocess.run(arguments, text=True, capture_output=True, check=False)
+            self.assertEqual(self.answer(root, "--passthrough").returncode, 0)
+            self.assertIn("1. Passthrough", (root / "COMMS.md").read_text(encoding="utf-8"))
+
+    def test_an_unanswered_question_is_refused_without_passthrough(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            arguments, _ = self.build(root)
+            subprocess.run(arguments, text=True, capture_output=True, check=False)
+            refused = self.answer(root)
+            self.assertEqual(refused.returncode, 1)
+            self.assertIn("left on purpose", refused.stderr)
+
+    def test_answers_are_never_written_twice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            arguments, _ = self.build(root)
+            subprocess.run(arguments, text=True, capture_output=True, check=False)
+            self.answer(root, "--passthrough")
+            again = self.answer(root, "--passthrough")
+            self.assertEqual(again.returncode, 1)
+            self.assertIn("already has answers", again.stderr)
 
 
 if __name__ == "__main__":
