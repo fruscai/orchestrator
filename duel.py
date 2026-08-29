@@ -21,6 +21,13 @@ MAX_ROUNDS = 10
 DEFAULT_ROUNDS = 3
 NO_FINDINGS = "NO FINDINGS"
 UNRESOLVED = 3
+SECURITY_OPEN = 4
+QUESTIONS_OPEN = 5
+# The reviewer tags each finding with one of these. Asking for an exact tag is the only
+# honest way to count findings: inferring a count from the shape of prose writes numbers
+# that look measured and are not.
+SEVERITIES = ("SECURITY", "BLOCKING", "IMPROVEMENT")
+QUESTION = "QUESTION"
 
 
 def parse_command(value):
@@ -207,6 +214,58 @@ def run_agent(command, prompt, workdir, timeout):
         return output, read_tokens(tokens_path)
 
 
+def tagged(text, tag):
+    """Lines opening with an exact tag, bullet markers allowed in front of it. Only the
+    tag is trusted: nothing is read out of the prose that follows it."""
+    found = []
+    marker = "[" + tag + "]"
+    for line in text.splitlines():
+        stripped = line.strip().lstrip("-*").lstrip()
+        if stripped.startswith(marker):
+            found.append(stripped[len(marker):].strip())
+    return found
+
+
+def severities(review):
+    """How many findings of each kind the reviewer marked. A reply that ignores the tags
+    counts as nothing, which is why the count stays null unless the tags are actually
+    there: an untagged review is unstructured, and guessing at it is what the log is
+    meant to avoid."""
+    return {name: tagged(review, name) for name in SEVERITIES}
+
+
+def untagged_lines(review):
+    """Non-blank lines carrying none of the tags, bullet markers stripped. A reply
+    mixing tagged findings with untagged lines is only partly readable, and the
+    unread part could be the finding that mattered."""
+    markers = tuple("[" + name + "]" for name in SEVERITIES + (QUESTION,))
+    leftover = []
+    for line in review.splitlines():
+        stripped = line.strip().lstrip("-*").lstrip()
+        if stripped and not stripped.startswith(markers):
+            leftover.append(stripped)
+    return leftover
+
+
+def shippable(review, counts):
+    """Nothing left that stops the work doing what was asked. Improvements do not block:
+    the smallest thing that works is what is being built, and there is always something
+    that could be better.
+
+    A review with no tags at all is not shippable. It is unstructured, so nothing is
+    known about it, and a reviewer that ignores the format would otherwise mark every
+    round finished by saying nothing the coordinator can read. A review with tags and
+    untagged lines beside them is not shippable either, for the same reason: one
+    readable improvement must not launder the lines that cannot be read. Ambiguity
+    holds the round open; it never ships.
+    """
+    if not any(counts.values()):
+        return False
+    if untagged_lines(review):
+        return False
+    return not counts["SECURITY"] and not counts["BLOCKING"]
+
+
 def no_findings(review):
     """The whole reply, exactly the sentinel, exactly as the prompt demands it. The
     sentinel followed by anything else is a contradiction, and a contradiction keeps
@@ -362,7 +421,12 @@ def build_proposal_prompt(task, builder, reviewer, prior, round_number):
         f"Task:\n{task}\n\n"
         f"You are {builder}, the builder. {reviewer} is the read-only reviewer.\n"
         "Inspect the current project and build or revise the requested work. Run the checks needed "
-        "for every behavioral claim. Do not invoke another agent or this coordinator.\n\n"
+        "for every behavioral claim. Do not invoke another agent or this coordinator.\n"
+        "Build the smallest thing that actually works. Leave out anything the task does not "
+        "require, and say plainly what you left out and why, so the omission is a decision on the "
+        "record rather than a gap.\n"
+        f"If you need a judgment that is not yours to make, put it on its own line starting with "
+        f"[{QUESTION}] and carry on with the rest.\n\n"
         f"Prior dispositions:\n{prior_text}\n\n"
         f"Produce the round {round_number} proposal for review. State changed files, checks run and "
         "anything not verified."
@@ -375,8 +439,17 @@ def build_review_prompt(task, builder, reviewer, proposal, areas, round_number):
         f"Task:\n{task}\n\n"
         f"You are {reviewer}, the read-only reviewer. {builder} built the proposal below.\n"
         "Do not edit any file. Find real defects only, no style preferences. Be terse and specific. "
-        f"Cover these areas: {areas}. {focus} Reply with a bullet list and no preamble. "
+        f"Cover these areas: {areas}, and security in every round whether or not it is listed. "
+        f"{focus} Reply with a bullet list and no preamble. "
         "Mark anything not verified as unverified. Do not invoke another agent or this coordinator.\n"
+        f"Start every finding with exactly one of [{SEVERITIES[0]}], [{SEVERITIES[1]}] or "
+        f"[{SEVERITIES[2]}]. Security is anything that lets the wrong party read, write or run "
+        "something. Blocking is anything that makes the work fail to do what was asked. Everything "
+        "else is an improvement, including things you would do differently. Do not mark something "
+        "blocking because it could be better: the smallest thing that works is the thing being "
+        "built.\n"
+        f"If you need a judgment from the person running this, put it on its own line starting "
+        f"with [{QUESTION}].\n"
         f"If there is nothing real to report, reply with exactly {NO_FINDINGS} on the first line and "
         "nothing else. Do not invent a finding to fill the silence.\n\n"
         f"Builder proposal:\n{proposal}"
@@ -386,9 +459,12 @@ def build_review_prompt(task, builder, reviewer, proposal, areas, round_number):
 def build_disposition_prompt(task, builder, proposal, review):
     return (
         f"Task:\n{task}\n\n"
-        f"You are {builder}, the builder. Verify each reviewer claim before acting. Make only the "
-        "changes required by confirmed findings, then run the relevant checks. Do not invoke another "
-        "agent or this coordinator.\n\n"
+        f"You are {builder}, the builder. Verify each reviewer claim before acting. Do not invoke "
+        "another agent or this coordinator.\n"
+        f"Fix every confirmed [{SEVERITIES[0]}] and [{SEVERITIES[1]}] finding. Leave "
+        f"[{SEVERITIES[2]}] findings alone unless one is a single obvious line, and say which you "
+        "left and why. Then run the relevant checks.\n"
+        f"Put anything needing a human judgment on its own line starting with [{QUESTION}].\n\n"
         f"Your proposal:\n{proposal}\n\n"
         f"Reviewer reply:\n{review}\n\n"
         "Reply with what actually changed because of the review, and what was left standing and why."
@@ -428,6 +504,28 @@ def run_turn(log, command, prompt, workdir, timeout, round_number, seq, parent,
     log.result(identifier, seconds, "ok",
                findings=findings_of(output) if findings_of else None, tokens=tokens)
     return identifier, output, tokens
+
+
+def count_findings(review):
+    """Null unless the reviewer used the tags. An untagged reply is prose, and a count
+    read out of prose is a number nobody should lean on."""
+    if no_findings(review):
+        return 0
+    total = sum(len(found) for found in severities(review).values())
+    return total or None
+
+
+def verdict_line(clean, counts, ship, leftover):
+    if clean:
+        return "Reviewer found nothing. Stopping rather than running the rounds asked for."
+    parts = [f"{len(found)} {name.lower()}" for name, found in counts.items() if found]
+    if leftover:
+        parts.append(f"{len(leftover)} line(s) the reviewer did not tag")
+    summary = ", ".join(parts) if parts else "nothing the coordinator can read as a finding"
+    if ship:
+        return (f"Findings: {summary}. Nothing blocking left, so this is the smallest "
+                "thing that works. Stopping.")
+    return f"Findings: {summary}."
 
 
 def cost_line(turns):
@@ -498,6 +596,12 @@ def main(argv=None):
     )
     dispositions = []
     unresolved = False
+    security = False
+    asked = False
+    # Questions asked so far this round. Held outside the try so a turn that fails
+    # cannot take the questions already asked before it down with it.
+    pending = []
+    failure = None
     try:
         for offset in range(args.rounds):
             number = completed + offset + 1
@@ -509,6 +613,7 @@ def main(argv=None):
                 log, builder_command, proposal_prompt, args.workdir, args.timeout,
                 number, 1, None, "build", "builder", builder_name,
             )
+            pending = tagged(proposal, QUESTION)
             review_prompt = build_review_prompt(
                 args.task,
                 builder_name,
@@ -520,11 +625,19 @@ def main(argv=None):
             review_id, review, review_tokens = run_turn(
                 log, reviewer_command, review_prompt, args.workdir, args.timeout,
                 number, 2, proposal_id, "review", "reviewer", reviewer_name,
-                findings_of=lambda text: 0 if no_findings(text) else None,
+                findings_of=count_findings,
             )
+            pending = pending + tagged(review, QUESTION)
+            counts = severities(review)
+            if counts["SECURITY"]:
+                # Flagged before the disposition turn runs, so a failure later in the
+                # round or the run cannot drop it.
+                security = True
             clean = no_findings(review)
+            ship = shippable(review, counts)
+            done = clean or ship
             fix_tokens = None
-            if clean:
+            if done:
                 # Nothing to dispose of, and no reason to spend a builder turn saying so.
                 disposition = "The reviewer reported no findings. Nothing was changed."
             else:
@@ -535,6 +648,7 @@ def main(argv=None):
                     log, builder_command, disposition_prompt, args.workdir, args.timeout,
                     number, 3, review_id, "fix", "builder", builder_name,
                 )
+                pending = pending + tagged(disposition, QUESTION)
             timestamp = datetime.now().astimezone()
             append_round(
                 args.comms,
@@ -554,17 +668,49 @@ def main(argv=None):
                  (builder_name, fix_tokens))
             ))
             print_decisions(log, args.routelog, args.routing_file, args.workdir, number)
-            if clean:
-                print("Reviewer found nothing. Stopping rather than running the rounds asked for.")
-                unresolved = False
+            print(verdict_line(clean, counts, ship, untagged_lines(review)))
+            if pending:
+                # A question that does not stop the run is not a question. The rounds
+                # after it would be built on an answer nobody gave.
+                asked = True
+                print("\nThe agents need a decision from you:")
+                for question in pending:
+                    print(f"  - {question}")
+                pending = []
+            if done or asked:
+                unresolved = not done
                 break
             unresolved = True
     except (OSError, RuntimeError, ValueError, KeyboardInterrupt) as error:
         print(str(error) or "interrupted", file=sys.stderr)
-        return 130 if isinstance(error, KeyboardInterrupt) else 1
+        failure = 130 if isinstance(error, KeyboardInterrupt) else 1
     finally:
         lock_handle.close()
+    if pending:
+        # The round broke before its boundary, but these were already asked and an
+        # error does not unask them.
+        asked = True
+        print("\nThe agents need a decision from you:")
+        for question in pending:
+            print(f"  - {question}")
     sys.stdout.flush()
+    if security:
+        # A security finding is never something the run gets to leave behind, whether
+        # or not the builder says it fixed it, and whether or not a later turn failed.
+        # Distinct from running out of rounds.
+        print("\nA security finding was raised. Do not treat this as finished until you "
+              "have checked it yourself.", file=sys.stderr)
+    if failure == 130:
+        # Ctrl-C means stop now. The warnings above still stand in the output.
+        return 130
+    if security:
+        return SECURITY_OPEN
+    if asked:
+        print("\nStopped so you can answer. Fold your answer into the task and run again.",
+              file=sys.stderr)
+        return QUESTIONS_OPEN
+    if failure is not None:
+        return failure
     if unresolved:
         # The cap is a stopping point, not a verdict. It exits distinctly so nothing
         # downstream mistakes "ran out of rounds" for "the work is finished".

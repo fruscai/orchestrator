@@ -538,5 +538,153 @@ class TokenTests(unittest.TestCase):
             self.assertIn("not reported by Agent A", result.stdout)
 
 
+class SeverityTests(unittest.TestCase):
+    """The smallest thing that works is what is being built, so an improvement must not
+    hold a round open and a security finding must never be left behind."""
+
+    def setUp(self):
+        if not WRITER.is_file():
+            self.skipTest(f"no routelog.py at {WRITER}")
+
+    def run_with_review(self, root, reply, rounds=3):
+        import shutil
+
+        shutil.copy(WRITER, root / "routelog.py")
+        fake = root / "fake.py"
+        fake.write_text(
+            "import sys\n"
+            "prompt = sys.stdin.read()\n"
+            f"reply = {reply!r}\n"
+            "if sys.argv[1] == 'b':\n"
+            "    print(reply)\n"
+            "else:\n"
+            "    print(sys.argv[1] + ':' + prompt.splitlines()[0])\n",
+            encoding="utf-8",
+        )
+        arguments = base_command(root, fake, root / "COMMS.md", rounds=rounds)
+        return subprocess.run(arguments, text=True, capture_output=True, check=False)
+
+    def findings_recorded(self, root):
+        events = [
+            json.loads(line)
+            for line in (root / "routing.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        return [e["findings"] for e in events if e["event"] == "result"]
+
+    def test_only_improvements_is_shippable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = self.run_with_review(root, "- [IMPROVEMENT] the naming could be clearer")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("smallest thing that works", result.stdout)
+            self.assertNotIn("Round 2 —", (root / "COMMS.md").read_text(encoding="utf-8"))
+            self.assertEqual(self.findings_recorded(root)[1], 1)
+
+    def test_blocking_keeps_the_rounds_going(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = self.run_with_review(root, "- [BLOCKING] it crashes on an empty file")
+            self.assertEqual(result.returncode, UNRESOLVED, result.stderr)
+            self.assertIn("Round 3 —", (root / "COMMS.md").read_text(encoding="utf-8"))
+
+    def test_security_is_never_left_behind(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Tagged as otherwise shippable on purpose: security must outrank that.
+            result = self.run_with_review(
+                root, "- [SECURITY] the token is written to a world readable path", rounds=1
+            )
+            self.assertEqual(result.returncode, 4)
+            self.assertIn("checked it yourself", result.stderr)
+
+    def test_an_untagged_review_is_not_shippable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # A reviewer ignoring the format must not read as nothing to fix.
+            result = self.run_with_review(root, "- the naming could be clearer")
+            self.assertEqual(result.returncode, UNRESOLVED, result.stderr)
+            self.assertIsNone(self.findings_recorded(root)[1])
+
+    def test_questions_are_put_in_front_of_the_human(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = self.run_with_review(
+                root,
+                "- [IMPROVEMENT] minor\n[QUESTION] should this refuse unknown hosts outright?",
+            )
+            self.assertIn("The agents need a decision from you:", result.stdout)
+            self.assertIn("should this refuse unknown hosts outright?", result.stdout)
+            # A question stops the run: the rounds after it would rest on an answer
+            # nobody gave.
+            self.assertEqual(result.returncode, 5)
+            self.assertNotIn("Round 2 —", (root / "COMMS.md").read_text(encoding="utf-8"))
+
+    def test_a_tagged_improvement_does_not_launder_an_untagged_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # The untagged line could be the finding that mattered, so the round
+            # stays open rather than shipping on the one readable tag.
+            result = self.run_with_review(
+                root, "- [IMPROVEMENT] minor\n- it crashes on an empty file", rounds=1
+            )
+            self.assertEqual(result.returncode, UNRESOLVED, result.stderr)
+            self.assertNotIn("smallest thing that works", result.stdout)
+            self.assertIn("1 line(s) the reviewer did not tag", result.stdout)
+
+    def test_security_survives_a_later_failure(self):
+        import shutil
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copy(WRITER, root / "routelog.py")
+            calls = root / "builder.calls"
+            fake = root / "fake.py"
+            # The reviewer raises security every round; the builder's third call is
+            # the round 2 proposal, which fails. The failure must not eat the flag.
+            fake.write_text(
+                "import pathlib, sys\n"
+                "prompt = sys.stdin.read()\n"
+                "if sys.argv[1] == 'b':\n"
+                "    print('- [SECURITY] the token is written to a world readable path')\n"
+                "    raise SystemExit(0)\n"
+                f"counter = pathlib.Path({str(calls)!r})\n"
+                "count = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+                "counter.write_text(str(count))\n"
+                "if count >= 3:\n"
+                "    raise SystemExit(9)\n"
+                "print('a:' + prompt.splitlines()[0])\n",
+                encoding="utf-8",
+            )
+            arguments = base_command(root, fake, root / "COMMS.md", rounds=2)
+            result = subprocess.run(arguments, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 4, result.stderr)
+            self.assertIn("checked it yourself", result.stderr)
+            self.assertIn("agent exited with 9", result.stderr)
+
+    def test_a_proposal_question_survives_a_reviewer_failure(self):
+        import shutil
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copy(WRITER, root / "routelog.py")
+            fake = root / "fake.py"
+            # The builder asks in its proposal, then the reviewer dies. The question
+            # was already asked, and an error does not unask it.
+            fake.write_text(
+                "import sys\n"
+                "prompt = sys.stdin.read()\n"
+                "if sys.argv[1] == 'b':\n"
+                "    raise SystemExit(9)\n"
+                "print('proposal\\n[QUESTION] should unknown hosts be refused outright?')\n",
+                encoding="utf-8",
+            )
+            arguments = base_command(root, fake, root / "COMMS.md")
+            result = subprocess.run(arguments, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 5, result.stderr)
+            self.assertIn("should unknown hosts be refused outright?", result.stdout)
+            self.assertIn("agent exited with 9", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

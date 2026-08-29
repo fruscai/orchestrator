@@ -226,3 +226,114 @@ Also changed: README's "one title per round are required" line and the example i
 **Left standing:** a second Ctrl-C arriving during the result write inside an except handler could still skip that write. The reviewer's claim was the dispatch-to-try window, which is now closed; closing the double-interrupt case would mean holding SIGINT across the result writes too, and I left that for a finding rather than expanding scope.
 
 **Not verified:** the test suite was not executed this round. Command execution requiring approval — including every `python3` invocation — is blocked in this environment, so the suite run, and even a compile check, could not happen. Every changed region was re-read line by line after editing and the removed-symbol grep is clean, but the 18 tests (14 prior plus 4 new, with several existing ones now running under mandatory logging) are unrun, and the claim that they pass is not one I can make.
+
+## 08-29-2026
+
+Round 4 — smallest working thing, security, and questions
+09:51
+
+claude to codex
+
+```
+Task:
+The coordinator must select the smallest working thing, never leave a security finding behind, and stop for a human question every round it is asked one.
+
+You are codex, the read-only reviewer. claude built the proposal below.
+Do not edit any file. Find real defects only, no style preferences. Be terse and specific. Cover these areas: the severity rule, whether an untagged or malformed review can be read as shippable, the exit code precedence, and whether the tests prove what they claim, and security in every round whether or not it is listed. Attack the fixes from earlier rounds. Reply with a bullet list and no preamble. Mark anything not verified as unverified. Do not invoke another agent or this coordinator.
+Start every finding with exactly one of [SECURITY], [BLOCKING] or [IMPROVEMENT]. Security is anything that lets the wrong party read, write or run something. Blocking is anything that makes the work fail to do what was asked. Everything else is an improvement, including things you would do differently. Do not mark something blocking because it could be better: the smallest thing that works is the thing being built.
+If you need a judgment from the person running this, put it on its own line starting with [QUESTION].
+If there is nothing real to report, reply with exactly NO FINDINGS on the first line and nothing else. Do not invent a finding to fill the silence.
+
+Builder proposal:
+Round 1 proposal: the loop now selects the smallest working thing, refuses to leave a
+security finding behind, and stops for a human question.
+
+Changed files: duel.py and tests/test_duel.py in duel-coordinator. Nothing else.
+
+The rule
+
+The reviewer must start every finding with exactly [SECURITY], [BLOCKING] or
+[IMPROVEMENT]. Security is anything letting the wrong party read, write or run
+something. Blocking is anything making the work fail to do what was asked. Everything
+else is an improvement. The review prompt says explicitly not to mark something blocking
+because it could be better.
+
+shippable() is true when there is no security and no blocking finding. Improvements do
+not hold a round open, which is what makes "smallest thing that works" a rule the
+coordinator enforces rather than an instruction an agent can drift from.
+
+An untagged review is never shippable. A reviewer ignoring the format has said nothing
+the coordinator can read, and treating that as nothing-to-fix would let a broken
+reviewer mark every round finished. This was found by running the suite: ten tests
+failed on the first version, which had exactly that hole.
+
+Security
+
+A security finding sets a flag that survives the rest of the run and returns exit 4,
+ahead of every other outcome, with a message saying not to treat the work as finished
+without checking. It fires whether or not the builder claims to have fixed it.
+
+Questions
+
+Any agent can put a line starting with [QUESTION] in its reply. Questions from all three
+turns are collected, printed under a heading, and the run stops with exit 5. A question
+that does not stop the run is not a question: the rounds after it would rest on an
+answer nobody gave.
+
+Findings count
+
+routelog's findings field was null on every record ever written, because nothing could
+count prose honestly. It is now the number of tagged findings, and still null when the
+reviewer did not use the tags. Only structure is counted; nothing is inferred from the
+shape of the text.
+
+Exit codes now: 0 done, 1 error, 2 usage, 3 rounds used up with blocking findings open,
+4 security raised, 5 waiting on a human answer, 130 interrupted.
+
+Checks run
+
+24 tests pass, up from 19. Five new ones: only-improvements exits 0 in one round and
+records findings 1; a blocking finding runs all three rounds and exits 3; a security
+finding exits 4 with the warning; an untagged review exits 3 and records findings null;
+a question stops after round 1, prints the question and exits 5.
+
+Not verified
+
+- No round has been run against real agents with the new prompts. Whether codex actually
+  applies the tags consistently, and whether it agrees with these definitions of
+  security and blocking, is unknown.
+- tagged() strips leading "-" and "*" then matches the tag at the start. A finding whose
+  tag appears mid-line is not counted, and a reply that mentions a tag inside prose
+  would be.
+- The interaction between a question and a security finding in the same round is
+  ordered by exit code precedence only; both are printed, but only one code is returned.
+- No test covers a reviewer emitting two different tags on one line.
+```
+
+codex to claude
+
+- [BLOCKING] A mixed review such as `- [IMPROVEMENT] minor` plus an untagged or malformed blocking/security finding is treated as shippable. `shippable()` only requires one recognized tag, so the claimed “untagged review is never shippable” rule is incomplete.
+- [BLOCKING] Exit-code precedence does not preserve security across failures. After a security finding, a later-round agent or logging error returns exit 1 immediately, bypassing the final security check and exit 4.
+- [BLOCKING] A `[QUESTION]` in the builder proposal does not stop further turns. The coordinator still invokes the reviewer and possibly the disposition turn; if either fails, it returns exit 1 without presenting the already-asked question.
+- [IMPROVEMENT] The tests do not prove the stated precedence or persistence claims: the security test uses one round only, the question test asks from the reviewer only, and no test combines a prior security finding or proposal question with a later failure.
+
+claude to itself
+
+All three [BLOCKING] findings verified as real and fixed. The suite could not be executed: every form of `python3` invocation was refused by this session's permission gate, so the checks below are claims about code I read, not code I ran.
+
+**What changed because of the review**
+
+- **Mixed reviews no longer ship.** `shippable()` now takes the review text as well as the counts and refuses when `untagged_lines()` finds any non-blank line that carries none of the four tags after bullet stripping. One readable `[IMPROVEMENT]` no longer launders an untagged line beside it; ambiguity holds the round open and worst-cases to exit 3, never to a false ship. The verdict line names the untagged lines so the human sees why the round stayed open.
+- **Security survives later failures.** The `security` flag is now set immediately after the review turn, before the disposition runs, and the exception handler records the failure instead of returning. The final exit logic runs on every path: after a security finding, a later agent or logging error prints its error and still exits 4 with the warning.
+- **Questions survive later failures.** `pending` is accumulated turn by turn — proposal questions right after the build, review questions right after the review, disposition questions after the fix — and lives outside the `try`. A reviewer or disposition crash now prints the error, then the already-asked questions, and exits 5 instead of 1.
+- **Three new tests**, one per fix: a `[IMPROVEMENT]` plus an untagged line exits 3 and names the untagged line; a round-1 security finding followed by a round-2 builder crash exits 4 with both the crash and the warning on stderr; a proposal question followed by a reviewer crash prints the question and exits 5. The [IMPROVEMENT] finding is subsumed by these — the multi-round security test and the proposal-sourced-question test are exactly the gaps it named, so nothing of it was left standing.
+
+**What was left standing and why**
+
+- The coordinator still runs the reviewer and disposition turns after a proposal question, stopping at the round boundary. That is the design the proposal prompt states ("carry on with the rest"): the round's record stays complete and the review of the built work is still worth having. The defect was only the failure path losing the question, and that is fixed.
+- `count_findings` still counts only tagged findings, so a mixed review records the tagged count while refusing to ship. Counting the untagged lines would be inferring findings from prose, which the log deliberately refuses.
+- Consequence of the stricter rule, on the record: a reviewer that wraps one finding across multiple lines now keeps the round open, because a continuation line is indistinguishable from an untagged finding. It fails toward exit 3, never toward shipping.
+
+[QUESTION] When Ctrl-C lands after a security finding was raised, the run now prints the security warning but returns 130, not 4 — interrupt semantics for shells and wrappers won over the stated "4 ahead of every other outcome." Should security outrank the interrupt code too?
+
+[QUESTION] The checks were not run: `python3` requires an approval this non-interactive session cannot grant, and I will not claim a green suite I never saw. Run `python3 -m unittest discover -s tests` from the project root — 27 tests should collect (24 prior plus 3 new) — before treating any of the above behavioral claims as verified.
