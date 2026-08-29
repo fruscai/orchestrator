@@ -602,6 +602,38 @@ class SeverityTests(unittest.TestCase):
             self.assertEqual(result.returncode, 4)
             self.assertIn("checked it yourself", result.stderr)
 
+    def test_a_fixed_security_finding_does_not_condemn_the_run(self):
+        import shutil
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copy(WRITER, root / "routelog.py")
+            fake = root / "fake.py"
+            # Raised in round 1, gone by round 2. That is the loop working.
+            fake.write_text(
+                "import pathlib, sys\n"
+                "sys.stdin.read()\n"
+                "n = pathlib.Path(sys.argv[2])\n"
+                "if sys.argv[1] == 'b':\n"
+                "    count = int(n.read_text()) if n.exists() else 0\n"
+                "    n.write_text(str(count + 1))\n"
+                "    print('- [SECURITY] token world readable' if count == 0 else 'NO FINDINGS')\n"
+                "else:\n"
+                "    print('built')\n",
+                encoding="utf-8",
+            )
+            arguments = base_command(root, fake, root / "COMMS.md", rounds=2)
+            for side in ("--agent-a", "--agent-b"):
+                arguments[arguments.index(side) + 1] = (
+                    f"{quoted(sys.executable)} {quoted(str(fake))} {side[-1]} "
+                    f"{quoted(str(root / 'n.txt'))}"
+                )
+            arguments += ["--task-id", "security-fixed"]
+            result = subprocess.run(arguments, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("raised earlier", result.stderr)
+            self.assertNotIn("still open", result.stderr)
+
     def test_an_untagged_review_is_not_shippable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

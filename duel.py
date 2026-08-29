@@ -632,6 +632,7 @@ def main(argv=None):
     dispositions = []
     unresolved = False
     security = False
+    raised = False
     asked = False
     # Questions asked so far this round. Held outside the try so a turn that fails
     # cannot take the questions already asked before it down with it.
@@ -665,10 +666,12 @@ def main(argv=None):
             )
             pending = pending + tagged(review, QUESTION)
             counts = severities(review)
+            # Raised means it is on the record. Open means the last review still has
+            # it. A finding that was raised and then fixed is the loop working, not a
+            # reason to report the run as unsafe forever.
             if counts["SECURITY"]:
-                # Flagged before the disposition turn runs, so a failure later in the
-                # round or the run cannot drop it.
-                security = True
+                raised = True
+            security = bool(counts["SECURITY"])
             clean = no_findings(review)
             ship = shippable(review, counts)
             done = clean or ship
@@ -737,13 +740,17 @@ def main(argv=None):
             print(f"  - {question}")
     sys.stdout.flush()
     if security:
-        # A security finding is never something the run gets to leave behind, whether
-        # or not the builder says it fixed it, and whether or not a later turn failed.
-        # Distinct from running out of rounds.
-        print("\nA security finding was raised. Do not treat this as finished until you "
-              "have checked it yourself.", file=sys.stderr)
+        print("\nA security finding is still open. Do not treat this as finished until "
+              "you have checked it yourself.", file=sys.stderr)
+    elif raised:
+        # Raised and then fixed. Said plainly, because the fix was the builder's claim
+        # and a later reviewer going quiet is not the same as you having looked.
+        print("\nA security finding was raised earlier and the last review no longer "
+              "reports it. Check that yourself before trusting it.", file=sys.stderr)
     if failure == 130:
-        # Ctrl-C means stop now. The warnings above still stand in the output.
+        if security:
+            print("Exit 130 because it was interrupted. The open security finding above "
+                  "stands.", file=sys.stderr)
         return 130
     if security:
         return SECURITY_OPEN
