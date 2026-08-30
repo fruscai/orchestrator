@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-PROGRAM = PROJECT / "duel.py"
+PROGRAM = PROJECT / "orchestrator.py"
 WRITER = PROJECT.parent / "routelog.py"
 # A run that used up its rounds with findings still open. Distinct from success so
 # nothing downstream reads "ran out of rounds" as "the work is finished".

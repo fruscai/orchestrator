@@ -20,7 +20,7 @@ unlogged mode.
 ## Run
 
 ```sh
-python3 duel.py "Implement the requested change" \
+python3 orchestrator.py "Implement the requested change" \
   --agent-a '<builder command>' \
   --agent-b '<read-only reviewer command>' \
   --builder a \
