@@ -125,7 +125,7 @@ def validate_args(args):
 
 def acquire_lock():
     identity = hashlib.sha256(str(Path(__file__).resolve()).encode()).hexdigest()[:16]
-    path = Path(tempfile.gettempdir()) / f"duel-coordinator-{identity}.lock"
+    path = Path(tempfile.gettempdir()) / f"orchestrator-{identity}.lock"
     handle = path.open("w", encoding="utf-8")
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)

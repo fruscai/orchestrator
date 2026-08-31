@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# built from every project's routing.jsonl by collect.py, never authored by hand
+training.jsonl

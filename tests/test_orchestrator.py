@@ -11,7 +11,7 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
 PROGRAM = PROJECT / "orchestrator.py"
-WRITER = PROJECT.parent / "routelog.py"
+WRITER = PROJECT / "routelog.py"
 # A run that used up its rounds with findings still open. Distinct from success so
 # nothing downstream reads "ran out of rounds" as "the work is finished".
 UNRESOLVED = 3
@@ -738,7 +738,7 @@ class AnswerTests(unittest.TestCase):
     """A question is only in the loop if the answer gets back into it. Answering by hand
     and retyping it into the next task is the step that quietly does not happen."""
 
-    ANSWER = PROJECT.parent / "answer.py"
+    ANSWER = PROJECT / "answer.py"
 
     def setUp(self):
         if not WRITER.is_file():

@@ -119,6 +119,7 @@ Agree with the headline: turn count is bounded, execution is not contained. Add:
 Agent A to itself
 
 The final output-pipe wait now has a bound after timeout, and Ctrl-C terminates the active process group. Tests cover both cases. The trust boundary remains: commands inherit the current environment and filesystem permissions, and a descendant that starts a separate process group is outside the cleanup boundary. The earlier transcript framing was replaced by the exact COMMS.md exchange format.
+
 Round 3 — routelog wired into the coordinator
 20:49
 
@@ -229,7 +230,115 @@ Also changed: README's "one title per round are required" line and the example i
 
 ## 08-29-2026
 
-Round 4 — smallest working thing, security, and questions
+
+## 08-29-2026
+
+Round 4 — the first report over the training log
+09:39
+
+claude to codex
+
+```
+Task:
+report.py must read training.jsonl and print an honest plain English summary: only human decisions counted towards how work was received, the highest rev of a correction winning, unknown values never shown as zero, and the reader warned when the numbers compare jobs rather than agents.
+
+You are codex, the read-only reviewer. claude built the proposal below.
+Do not edit any file. Find real defects only, no style preferences. Be terse and specific. Cover these areas: correctness of the counting, the rev tie-break, null versus zero, and whether the untested branches actually work. Attack the proposal. Reply with a bullet list and no preamble. Mark anything not verified as unverified. Do not invoke another agent or this coordinator.
+If there is nothing real to report, reply with exactly NO FINDINGS on the first line and nothing else. Do not invent a finding to fill the silence.
+
+Builder proposal:
+Round 1 proposal: report.py, a plain English summary of the training log.
+
+Changed files: report.py is new. collect.py gained two lines so the root's own
+routing.jsonl is collected alongside the project ones; without it, work on the shared
+scripts would be logged and then never gathered.
+
+What report.py does
+
+Reads training.jsonl and prints counts as sentences. It is deliberately not a model.
+The point is that it can be read by eye long before there is enough data to train
+anything, because reading it is how the fields get corrected.
+
+Structure
+
+- load() groups records into dispatches, results and decisions, keyed on the pair of
+  project and id. Ids are generated per project, so an id alone does not identify a
+  dispatch once projects are read together.
+- settled() returns the decision that stands, which is the one with the highest rev.
+  Corrections are appended rather than edited, so the highest rev wins and stays
+  unambiguous when two land in the same second.
+- describe_work() reports, per participant, what kinds of work they were given and how
+  many of those you judged, split into kept, kept part of, and refused. Only decisions
+  with by == "human" are counted. A builder judging what it kept from its reviewer is
+  grading the agent that just criticised it.
+- describe_cost() reports median seconds per turn and total tokens, naming how many
+  turns did not report tokens rather than treating those as zero.
+- describe_confound() warns when no kind of work has gone to more than one
+  participant, because in that case the numbers compare the jobs and not the agents.
+- describe_gaps() names dispatches with no result, dispatches with no decision,
+  decisions made by the builder rather than by you, and unreadable lines.
+
+Checks run
+
+Executed against the real training.jsonl, six records, three dispatches. Output was
+read and two wording bugs were found and fixed: "dispatchs" from a pluraliser that only
+appended "s", and "3 dispatches is waiting" from a hardcoded singular verb. plural()
+now handles ch/sh/s/x/z endings and verb() picks the agreement.
+
+Not verified
+
+- No test file exists for report.py at all. Every claim above rests on one run against
+  one small log.
+- The rev tie-break has never been exercised: no correction has ever been written, so
+  settled() has only ever seen lists of length zero or one.
+- Only "adopted" has ever appeared in the data. The partial and refused branches have
+  never run.
+- describe_cost uses statistics.median on a list that is empty when no result carries
+  seconds; the guard is "if not seconds: continue", which has not been hit.
+- describe_confound uses set.intersection across participants and returns nothing when
+  a shared kind exists. The behaviour with three or more participants is unexamined.
+- No dispatch in the data has status other than ok, so the failed-turn counting is
+  unrun.
+```
+
+codex to claude
+
+- `settled()` does not make equal highest revisions unambiguous: `max()` silently selects the first record, so a later correction with the same `rev` loses. Verified with conflicting `rev: 2` decisions.
+- A null `rev` crashes `settled()` with `TypeError` when compared with an integer. Verified.
+- A human decision with missing or unknown `adoption` is counted as judged and printed as `kept 0`, misrepresenting an unknown value as zero. Verified.
+- `describe_cost()` prints nothing for a participant when all `seconds` values are unknown, even when tokens are known, so the token total and missing-time condition disappear. Verified.
+- `describe_confound()` requires one work kind shared by every participant. With three participants whose kinds overlap pairwise, it falsely says the figures compare jobs rather than agents and claims no same kind went “to both.” Verified.
+
+claude to itself
+
+Every form of python invocation (project dir, scratchpad, absolute path, trivial `-c`) hits the approval gate, and this session is non-interactive, so nobody can grant it. I cannot execute the checks; I've verified the edits by reading the resulting code instead, and I'm reporting that limitation plainly rather than claiming a run happened.
+
+## What changed because of the review
+
+All five findings were confirmed by reading the code, and all five are fixed in report.py:
+
+1. **Equal-rev tie now goes to the later record.** `settled()` no longer uses `max()`, which keeps the first of equal maxima. It now iterates in file order with `>=`, so between equal revs the record appended last wins — matching the append-only correction model. (`report.py:47`)
+
+2. **Null rev no longer crashes.** `record.get("rev", 0)` returned `None` when the field was present but null, and comparing `None` with an int raises TypeError. Any rev that is not a number is now treated as zero. (Same function.)
+
+3. **Unknown adoption is no longer printed as "kept 0".** A human decision whose `adoption` is missing or unrecognized is no longer counted in `judged`; it is reported separately as "N decisions did not say how the work was received and are not counted." Only decisions with adopted, partial, or refused feed the kept/part/refused counts. (`report.py:84-107`)
+
+4. **A participant with no reported seconds no longer vanishes from the cost section.** The `if not seconds: continue` is gone. The line now says "no turn reported how long it took" and still prints the token total and the did-not-report count when tokens are known. (`report.py:118-121`)
+
+5. **The confound warning now checks whether any kind reached more than one participant**, not whether one kind is shared by all of them. It counts, per kind, how many participants' kind-sets contain it; the warning fires only when every kind belongs to exactly one participant. The wording changed from "goes to both" to "goes to more than one participant," which is also correct for three or more. (`report.py:132-149`)
+
+## What was left standing and why
+
+- The overall structure, `load()`, `plural()`/`verb()`, `describe_gaps()`, and `main()` — no finding touched them.
+- collect.py — read in full; the review raised nothing against it and I made no change there.
+- In `describe_work`, "kept 0" can still print when kept is genuinely zero but refusals exist (e.g. "kept 0, refused 2"). That is a known zero, not an unknown shown as zero, so it stays.
+
+## Not verified
+
+- **No check was run.** Every python3 invocation in this session requires approval that cannot be granted non-interactively, so the fixed code has not been executed — not against the real training.jsonl and not against synthetic records for the tie, null-rev, unknown-adoption, tokens-without-seconds, or three-participant cases. The claims above rest on reading the code, which is exactly the failure mode the review just caught me in once. The first action when execution is available should be `python3 report.py` plus a synthetic log exercising those five paths.
+- The five untested paths listed in the round 1 proposal (tie-break, partial/refused branches, empty-seconds guard, multi-participant confound, failed-turn counting) remain unexercised for the same reason, though three of them were rewritten this round.
+
+Round 5 — smallest working thing, security, and questions
 09:51
 
 claude to codex
