@@ -1,5 +1,22 @@
 # Decisions
 
+## ADR 12, no personal or system information reaches a repository
+
+Status: accepted 08-31-2026
+
+Context. This repository was made public with `/Users/<name>` written into `LOG.md`, `COMMS.md` and
+`newproject.command`, in the working tree and in every earlier commit. Making a repository private
+again does not undo a public one: clones, forks and caches survive the change.
+
+Decision. No absolute home path, username, IP address, hostname, key, token or email address goes
+into any repository, public or private. Paths are derived rather than written out:
+`$MEMROOT/${HOME//\//-}/memory` carries no username where the literal path does. Anything already
+committed is removed from history rather than only from the tip.
+
+Consequences. The security review pass carries this as a standing job, not a one-off check, and
+a review that only reads the working tree is not enough. A history rewrite needs a force push, and
+that is Amine's to run.
+
 ## ADR 11, security is fixed, not fled from
 
 Status: accepted 08-29-2026
