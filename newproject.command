@@ -98,8 +98,6 @@ __pycache__/
 .env.*
 !.env.example
 
-# the round transcript, names the agents by tool name and never goes into a repository
-COMMS.md
 EOF
 
 if [[ -f ~/.gitignore_global ]]; then

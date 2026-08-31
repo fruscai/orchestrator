@@ -5,5 +5,3 @@ __pycache__/
 # built from every project's routing.jsonl by collect.py, never authored by hand
 training.jsonl
 
-# the round transcript, names the agents by tool name and never goes into a repository
-COMMS.md
