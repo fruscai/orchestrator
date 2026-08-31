@@ -8,7 +8,9 @@ setopt no_nomatch          # an empty glob must not abort the script
 cd "$(dirname -- "$0")"
 
 MEMROOT=~/.claude/projects
-SOURCE_MEM=$MEMROOT/-<home>/memory
+# The memory directory is named after the home path with each slash turned into a
+# dash. Derived rather than written out, so this carries no username.
+SOURCE_MEM=$MEMROOT/${HOME//\//-}/memory
 COORD=~/Desktop/Claude_Projects/orchestrator/orchestrator.py
 SPEC=~/Desktop/Claude_Projects/orchestrator/ROUTING.md
 WRITER=~/Desktop/Claude_Projects/orchestrator/routelog.py
