@@ -66,8 +66,12 @@ Each completed round is appended to `COMMS.md` with a clock-generated date and t
 holds the exact review prompt, the unedited reviewer reply and the builder's disposition. Dates and
 rounds stay oldest first, and round numbers continue across separate runs.
 
-The builder side, review areas, a task id and at least one round title are required. Choose the
-builder side before the first round. Rounds is a ceiling, not a count: a review that replies with
+The builder side, review areas, a task id and at least one round title are required. `--builder
+auto` reads the routing log, alternates the builder across tasks and keeps it fixed within one, so
+a task resumed in a separate run keeps the builder it started with. `--agent-a-review` and
+`--agent-b-review` say how to call each agent when it reviews, so the reviewer can be invoked
+read-only while the builder is not; each defaults to that agent's build command. Rounds is a
+ceiling, not a count: a review that replies with
 exactly `NO FINDINGS` ends the run early, and the last title supplied covers any round past the
 titles given.
 
@@ -114,6 +118,11 @@ finding still open at the last review, 5 waiting on an answer, 130 interrupted.
 
 Every dispatch is recorded through `routelog.py` into `routing.jsonl`, with a result on every exit
 path. A run without a reachable `routelog.py` is refused; there is no unlogged mode.
+
+`--builder auto` trusts what the log says. Any command that can write `routing.jsonl` can append a
+forged build dispatch and decide which side builds next, so the choice is only as trustworthy as
+the commands allowed to write the file. `--routing-file` can point the log somewhere the agent
+commands cannot write.
 
 `orchestrator.py` writes the dispatch and result lines itself and prints the decision commands for
 you, because the decision is yours:

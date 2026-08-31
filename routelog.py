@@ -53,9 +53,11 @@ def read_events(path):
             if not line:
                 continue
             try:
-                events.append(json.loads(line))
+                event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(event, dict):
+                events.append(event)
     return events
 
 

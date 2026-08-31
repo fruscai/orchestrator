@@ -446,3 +446,62 @@ All three [BLOCKING] findings verified as real and fixed. The suite could not be
 [QUESTION] When Ctrl-C lands after a security finding was raised, the run now prints the security warning but returns 130, not 4 — interrupt semantics for shells and wrappers won over the stated "4 ahead of every other outcome." Should security outrank the interrupt code too?
 
 [QUESTION] The checks were not run: `python3` requires an approval this non-interactive session cannot grant, and I will not claim a green suite I never saw. Run `python3 -m unittest discover -s tests` from the project root — 27 tests should collect (24 prior plus 3 new) — before treating any of the above behavioral claims as verified.
+
+## 08-31-2026
+
+Round 6 — alternating the builder and per-role commands
+00:33
+
+claude to codex
+
+```
+Task:
+Add --builder auto to orchestrator.py, which alternates the builder across tasks and keeps it fixed within one task, plus per-role commands --agent-a-review and --agent-b-review so the agent that reviews can be invoked read-only while the agent that builds is not. The work is already implemented in choose_builder and the agents dict in main. Verify it rather than rewriting it.
+
+You are codex, the read-only reviewer. claude built the proposal below.
+Do not edit any file. Find real defects only, no style preferences. Be terse and specific. Cover these areas: correctness of the builder choice, what happens with no log or a corrupt one, and whether the per-role commands can leave an agent invoked with the wrong permissions, and security in every round whether or not it is listed. Attack the fixes from earlier rounds. Reply with a bullet list and no preamble. Mark anything not verified as unverified. Do not invoke another agent or this coordinator.
+Start every finding with exactly one of [SECURITY], [BLOCKING] or [IMPROVEMENT]. Security is anything that lets the wrong party read, write or run something. Blocking is anything that makes the work fail to do what was asked. Everything else is an improvement, including things you would do differently. Do not mark something blocking because it could be better: the smallest thing that works is the thing being built.
+If you need a judgment from the person running this, put it on its own line starting with [QUESTION].
+If there is nothing real to report, reply with exactly NO FINDINGS on the first line and nothing else. Do not invent a finding to fill the silence.
+
+Builder proposal:
+Round 6 proposal.
+
+The requested work was already in the working tree and reading it confirms it does what the task says. `--builder auto` (orchestrator.py:53) is resolved in main before any dispatch by `choose_builder` (orchestrator.py:364), which reads routing.jsonl under the coordinator lock: the task's own last build dispatch wins, so a task resumed in a separate run keeps its builder; otherwise the choice alternates off the last other task's build dispatch; only `kind == "build"` events count, unreadable lines are skipped, and an unrecognized participant falls back to "a". The per-role commands (orchestrator.py:49-52) land in the agents dict as a third slot defaulting to the build command (orchestrator.py:659-662); the builder's build and fix turns use slot 1 and the reviewer's turn uses slot 2 (orchestrator.py:668-670), so the review-only invocation is used exactly when that agent reviews. The tests cover this with six choose_builder unit tests (empty log, alternation both ways, task stickiness, review dispatches ignored, unreadable line, renamed participant) and one integration test that runs the coordinator twice with `--builder auto` and asserts the build participants alternate; I traced its helpers and flow and they are wired correctly.
+
+Changed files this round: README.md only. Its prose said to choose the builder side before the first round, which contradicts auto, so I replaced that sentence with a description of the two new flags. orchestrator.py and tests/test_orchestrator.py were already changed before this round and I changed nothing in them; routing.jsonl gained this run's own dispatch record, written by the coordinator, not by me.
+
+Checks run: static only — the full diff against HEAD, a line-by-line read of choose_builder, main's wiring, and the new tests, and a grep of every doc for stale descriptions of the flags.
+
+Not verified: the test suite was not executed. Python invocation is approval-gated in this round's sandbox — `python3`, `/usr/bin/python3`, sandboxed and not, were all refused — so every behavioral claim above rests on reading, not running. Separately, the integration tests inherit `DUEL_COORDINATOR_ACTIVE=1` when launched from inside a coordinator turn and orchestrator.py refuses the nested launch, a pre-existing property of the whole suite, so the suite must be run outside a coordinator round regardless.
+
+Left out: no edits to orchestrator.py or the tests, because the task said verify rather than rewrite and reading found nothing wrong; the README example still shows `--builder a`, which remains a valid invocation now that the prose covers auto; no entries in DECISIONS.md or LOG.md, because those record the human's judgments. The README wording was matched to the file's own surrounding sentences because LEXICON.md is unreadable from this sandbox.
+
+[QUESTION] No round can execute the test suite while python is approval-gated here, so verification by execution has to come from you: run `python3 tests/test_orchestrator.py` outside a coordinator turn, or grant python approval to these rounds — which do you want?
+```
+
+codex to claude
+
+- [BLOCKING] Unverified at runtime: a corrupt log line containing valid non-object JSON such as `null` or `[]` makes `event.get(...)` raise `AttributeError`. `choose_builder()` runs outside `main()`’s error handler, so `--builder auto` exits with a traceback instead of choosing a builder or reporting a controlled error (`orchestrator.py:380-384, 663-667`).
+- [SECURITY] Unverified at runtime: builder commands retain write access to `routing.jsonl`, so a builder can append forged build dispatches and control which command receives build permissions on later automatic runs. The coordinator trusts `task_id` and `participant` fields without authenticating the record (`orchestrator.py:376-395`).
+
+claude to itself
+
+ROUTING.md makes no claim about malformed lines, so no doc contradicts the fix. Both findings are now dealt with; here is the disposition.
+
+What changed because of the review.
+
+The [BLOCKING] finding is confirmed by reading: `json.loads` accepts `null`, `[]`, quoted strings and bare numbers, the `except json.JSONDecodeError` never fires on them, and `choose_builder` runs at orchestrator.py:664 — after the first error handler closes at 658 and before the round-loop try opens at 688 — so the AttributeError escapes `main` as a traceback. Fixed by treating non-dict JSON as unreadable, and in all three readers of the file rather than only the cited one, because the identical crash sits one call later: `RouteLog.elapsed` reads the same file on the first dispatch of the same run and its AttributeError is also uncaught (the round-loop handler lists OSError, RuntimeError, ValueError and KeyboardInterrupt only), and routelog.py's `read_events` fed the `null` event into `dispatch_ids`, crashing the writer subprocess so every append was refused. Each fix is the same two-line `isinstance(event, dict)` guard. The unreadable-line unit test now includes `null`, `[]`, `"quoted"` and `7`, and a new integration test seeds the log with `null` and `[]` and asserts an auto run completes with Agent A chosen.
+
+The [SECURITY] finding is confirmed as a fact but left standing in code, deliberately. The README's own trust model (lines 19-21) says the commands are trusted local programs the coordinator does not isolate; within that model no in-band authentication is real, because any signing key or side-state the coordinator could check is readable and writable by the same-user builder process, so signing the log would be assurance, not security. The lever that actually works already exists: `--routing-file` can put the log where the agent commands cannot write. What changed is the README's routing-log section, which now states plainly that `--builder auto` trusts the log, that any command able to write `routing.jsonl` can forge the choice, and that `--routing-file` moves it out of reach.
+
+Checks run: none executed. Python is approval-gated again this round — `python3` and `/usr/bin/python3` both refused — so every claim above rests on reading. A standalone verification script exercising all three readers against a junk-seeded log is written at the scratchpad path `verify_choose.py` and could not be run. I did not strip `DUEL_COORDINATOR_ACTIVE` to force the integration tests, since that would be invoking this coordinator from inside a round.
+
+[QUESTION] Verification by execution still has to come from you: run `python3 -m unittest discover -s tests -v` outside a round, or grant python approval to these rounds.
+[QUESTION] Should routing.jsonl's default location move outside the working tree, or does it stay in-repo — tracked and collected by collect.py — with `--routing-file` as the documented opt-out? The forgery finding is only closed by the layout decision, not by code.
+
+questions for you
+
+1. No round can execute the test suite while python is approval-gated here, so verification by execution has to come from you: run `python3 tests/test_orchestrator.py` outside a coordinator turn, or grant python approval to these rounds — which do you want?
+2. Verification by execution still has to come from you: run `python3 -m unittest discover -s tests -v` outside a round, or grant python approval to these rounds.
+3. Should routing.jsonl's default location move outside the working tree, or does it stay in-repo — tracked and collected by collect.py — with `--routing-file` as the documented opt-out? The forgery finding is only closed by the layout decision, not by code.

@@ -734,6 +734,103 @@ class SeverityTests(unittest.TestCase):
             self.assertIn("agent exited with 9", result.stderr)
 
 
+class BuilderChoiceTests(unittest.TestCase):
+    """Who builds has to vary, or the routing log has no label to learn from. It also
+    has to stay put inside one task, or a single piece of work is credited to two."""
+
+    NAMES = ("Agent A", "Agent B")
+
+    def setUp(self):
+        sys.path.insert(0, str(PROJECT))
+        import orchestrator
+
+        self.orchestrator = orchestrator
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.directory.name) / "routing.jsonl"
+
+    def tearDown(self):
+        self.directory.cleanup()
+        sys.path.remove(str(PROJECT))
+
+    def write(self, *records):
+        with self.path.open("a", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record) + "\n")
+
+    def dispatch(self, task_id, participant, kind="build"):
+        return {"event": "dispatch", "id": f"{task_id}-{participant}-{kind}",
+                "task_id": task_id, "kind": kind, "participant": participant}
+
+    def choose(self, task_id):
+        return self.orchestrator.choose_builder(self.path, task_id, self.NAMES)
+
+    def test_no_log_starts_with_a(self):
+        self.assertEqual(self.choose("first-task"), "a")
+
+    def test_alternates_off_the_last_different_task(self):
+        self.write(self.dispatch("earlier-task", "Agent A"))
+        self.assertEqual(self.choose("new-task"), "b")
+        self.write(self.dispatch("earlier-task", "Agent B"))
+        self.assertEqual(self.choose("new-task"), "a")
+
+    def test_a_task_keeps_the_builder_it_started_with(self):
+        # Its own record wins over the alternation, so resuming a task in a separate run
+        # does not hand half the work to the other agent.
+        self.write(self.dispatch("earlier-task", "Agent A"),
+                   self.dispatch("this-task", "Agent B"),
+                   self.dispatch("later-task", "Agent B"))
+        self.assertEqual(self.choose("this-task"), "b")
+
+    def test_review_dispatches_do_not_decide_who_builds(self):
+        self.write(self.dispatch("earlier-task", "Agent A"),
+                   self.dispatch("earlier-task", "Agent B", kind="review"))
+        self.assertEqual(self.choose("new-task"), "b")
+
+    def test_an_unreadable_line_does_not_stop_the_read(self):
+        self.path.write_text('not json\nnull\n[]\n"quoted"\n7\n', encoding="utf-8")
+        self.write(self.dispatch("earlier-task", "Agent A"))
+        self.assertEqual(self.choose("new-task"), "b")
+
+    def test_a_renamed_agent_falls_back_rather_than_guessing(self):
+        self.write(self.dispatch("earlier-task", "someone-else"))
+        self.assertEqual(self.choose("new-task"), "a")
+
+
+class BuilderAutoRunTests(unittest.TestCase):
+    """The choice has to survive a real run, not only the function that makes it."""
+
+    def setUp(self):
+        require_writer(self)
+
+    def test_two_tasks_in_one_project_get_different_builders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "fake.py"
+            fake.write_text("import sys\nsys.stdin.read()\nprint('NO FINDINGS')\n",
+                            encoding="utf-8")
+            for task in ("task-one", "task-two"):
+                arguments = base_command(root, fake, root / "COMMS.md", task_id=task)
+                arguments[arguments.index("--builder") + 1] = "auto"
+                subprocess.run(arguments, text=True, capture_output=True, check=False)
+            builders = [json.loads(line)["participant"]
+                        for line in (root / "routing.jsonl").read_text().splitlines()
+                        if json.loads(line).get("kind") == "build"]
+            self.assertEqual(builders, ["Agent A", "Agent B"])
+
+    def test_a_non_object_log_line_does_not_stop_an_auto_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "fake.py"
+            fake.write_text("import sys\nsys.stdin.read()\nprint('NO FINDINGS')\n",
+                            encoding="utf-8")
+            (root / "routing.jsonl").write_text("null\n[]\n", encoding="utf-8")
+            arguments = base_command(root, fake, root / "COMMS.md")
+            arguments[arguments.index("--builder") + 1] = "auto"
+            result = subprocess.run(arguments, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Builder chosen from the log: Agent A", result.stdout)
+
+
 class AnswerTests(unittest.TestCase):
     """A question is only in the loop if the answer gets back into it. Answering by hand
     and retyping it into the next task is the step that quietly does not happen."""

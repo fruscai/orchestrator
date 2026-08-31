@@ -44,7 +44,14 @@ def parse_args(argv=None):
     parser.add_argument("task")
     parser.add_argument("--agent-a", required=True, type=parse_command)
     parser.add_argument("--agent-b", required=True, type=parse_command)
-    parser.add_argument("--builder", required=True, choices=("a", "b"))
+    # The command that can edit is not the command that reviews. An agent that only ever
+    # reviews is normally invoked read-only, which is the wrong call when it builds.
+    parser.add_argument("--agent-a-review", dest="agent_a_review", type=parse_command, default=None,
+                        help="how to call agent a when it reviews. Defaults to --agent-a")
+    parser.add_argument("--agent-b-review", dest="agent_b_review", type=parse_command, default=None,
+                        help="how to call agent b when it reviews. Defaults to --agent-b")
+    parser.add_argument("--builder", required=True, choices=("a", "b", "auto"),
+                        help="auto alternates across tasks and stays fixed within one")
     parser.add_argument("--agent-a-name", default="Agent A")
     parser.add_argument("--agent-b-name", default="Agent B")
     parser.add_argument("--review-areas", required=True)
@@ -315,6 +322,8 @@ class RouteLog:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(event, dict):
+                    continue
                 if event.get("event") == "dispatch" and event.get("task_id") == self.task_id:
                     mine.add(event.get("id"))
                 elif event.get("event") == "result" and event.get("id") in mine:
@@ -352,6 +361,43 @@ class RouteLog:
         if tokens is not None:
             arguments.extend(("--tokens", str(tokens)))
         self.run(arguments)
+
+
+def choose_builder(path, task_id, names):
+    """Which side builds, when the side was not named.
+
+    Alternates across tasks and stays fixed within one. Roles that never move leave the
+    routing log nothing to learn from: `participant` is the label the routing model has
+    to predict, and a label with one value is not a label.
+
+    Read from the log rather than held in memory, so a task resumed in a separate run
+    keeps the builder it started with. A task that would flip mid-way would attribute one
+    piece of work to two participants.
+    """
+    if not path.exists():
+        return "a"
+    mine = None
+    other = None
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("event") != "dispatch" or event.get("kind") != "build":
+                continue
+            if event.get("task_id") == task_id:
+                mine = event.get("participant")
+            else:
+                other = event.get("participant")
+    if mine in names:
+        return "a" if mine == names[0] else "b"
+    if other in names:
+        # Whoever did not build the last task builds this one.
+        return "b" if other == names[0] else "a"
+    return "a"
 
 
 def read_tokens(path):
@@ -615,12 +661,17 @@ def main(argv=None):
         print(str(error), file=sys.stderr)
         return 2
     agents = {
-        "a": (args.agent_a_name, args.agent_a),
-        "b": (args.agent_b_name, args.agent_b),
+        "a": (args.agent_a_name, args.agent_a, args.agent_a_review or args.agent_a),
+        "b": (args.agent_b_name, args.agent_b, args.agent_b_review or args.agent_b),
     }
-    builder_name, builder_command = agents[args.builder]
+    if args.builder == "auto":
+        args.builder = choose_builder(
+            args.routing_file, args.task_id, (args.agent_a_name, args.agent_b_name)
+        )
+        print(f"Builder chosen from the log: {agents[args.builder][0]}")
+    builder_name, builder_command, _ = agents[args.builder]
     reviewer_key = "b" if args.builder == "a" else "a"
-    reviewer_name, reviewer_command = agents[reviewer_key]
+    reviewer_name, _, reviewer_command = agents[reviewer_key]
     log = RouteLog(
         args.routelog,
         args.routing_file,
